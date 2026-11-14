@@ -24,18 +24,43 @@ def totals(items):
     expenses = sum(x.amount for x in items if x.type == "expense")
     return income, expenses
 
+
 def forecast(items, days=30):
-    today = date.today(); start = today - timedelta(days=29)
-    history = [x for x in items if x.date >= start and x.date <= today]
+    today = date.today()
+    start = today - timedelta(days=29)
+
+    # Use transactions from the last 30 days
+    history = [
+        x for x in items
+        if start <= x.date <= today
+    ]
+
     income, expenses = totals(history)
+
+    # Current net balance for the forecasting period
     balance = income - expenses
-    # Use daily average net movement as a simple transparent baseline forecast.
-    daily_net = balance / 30 if history else 0
-    result=[]; running=balance
-    for i in range(1, days+1):
+
+    # Average daily income and expenses
+    daily_income = income / 30 if history else 0
+    daily_expenses = expenses / 30 if history else 0
+
+    daily_net = daily_income - daily_expenses
+
+    result = []
+    running = balance
+
+    for i in range(1, days + 1):
         running += daily_net
-        result.append({"date": (today+timedelta(days=i)).isoformat(), "predicted_balance": round(running,2)})
-    return result, round(balance,2), round(daily_net,2)
+
+        result.append({
+            "date": (today + timedelta(days=i)).isoformat(),
+            "predicted_balance": round(running, 2),
+            "estimated_income": round(daily_income, 2),
+            "estimated_expenses": round(daily_expenses, 2)
+        })
+
+    return result, round(balance, 2), round(daily_net, 2)
+
 
 def health_score(items):
     income, expense = totals([x for x in items if x.date.month == date.today().month and x.date.year == date.today().year])

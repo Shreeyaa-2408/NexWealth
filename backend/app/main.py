@@ -122,11 +122,30 @@ def analytics(user: User=Depends(current_user), db: Session=Depends(get_db)):
         key=x.date.strftime("%b %Y"); months[key]["income" if x.type=="income" else "expenses"]+=x.amount
     return {"categories":[{"category":k,"amount":round(v,2)} for k,v in sorted(cats.items(),key=lambda z:-z[1])],"monthly":[{"month":k,**{a:round(b,2) for a,b in v.items()}} for k,v in sorted(months.items())]}
 
+
 @app.get("/api/forecast")
-def get_forecast(days: int=30, user: User=Depends(current_user), db: Session=Depends(get_db)):
-    if days not in (7,15,30): raise HTTPException(400,"days must be 7, 15 or 30")
-    data,balance,daily=forecast(txs(db,user.id),days)
-    return {"current_balance":balance,"estimated_daily_net_change":daily,"forecast":data,"disclaimer":"Forecasts are estimates based on available transaction history, not guaranteed balances or financial advice."}
+def get_forecast(
+    days: int = 30,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db)
+):
+    if days not in (7, 15, 30):
+        raise HTTPException(400, "days must be 7, 15 or 30")
+
+    data, balance, daily = forecast(
+        txs(db, user.id), days
+    )
+
+    return {
+        "current_balance": balance,
+        "estimated_daily_net_change": daily,
+        "forecast": data,
+        "disclaimer": (
+            "Income and expense lines are daily averages based on "
+            "the previous 30 days. Projected balance is an estimate "
+            "based on average net cash flow, not guaranteed future activity."
+        )
+    }
 
 @app.get("/api/health-score")
 def get_health(user: User=Depends(current_user), db: Session=Depends(get_db)): return health_score(txs(db,user.id))
@@ -180,6 +199,7 @@ def simulate(payload:SimulateIn,user:User=Depends(current_user),db:Session=Depen
     return {"product_name":payload.product_name,"price":payload.price,"current_balance":round(current,2),"balance_after_purchase":round(current-payload.price,2),"safe_to_spend":safe,"affordable":payload.price<=safe,"message":"This purchase is within your estimated safe-to-spend amount." if payload.price<=safe else "This purchase exceeds your estimated safe-to-spend amount. Consider saving towards it first.","disclaimer":"Estimate only. Check upcoming bills and actual account balances before making a purchase."}
 
 
+
 def generate_gemini_response(api_key, model, prompt):
     from google import genai
 
@@ -197,13 +217,68 @@ async def chat(
     user: User = Depends(current_user),
     db: Session = Depends(get_db)
 ):
+    # Get this user's transactions
     items = txs(db, user.id)
 
-    inc, exp = totals([
+    # Filter transactions for the current month
+    current_month_items = [
         x for x in items
         if x.date.month == date.today().month
         and x.date.year == date.today().year
-    ])
+    ]
+
+    # Calculate income and expenses
+    inc, exp = totals(current_month_items)
+
+    # Calculate expense totals by category
+    category_totals = defaultdict(float)
+
+    for transaction in current_month_items:
+        if transaction.type == "expense":
+            category_totals[transaction.category or "Other"] += float(
+                transaction.amount
+            )
+
+    ranked_categories = sorted(
+        category_totals.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    question = payload.message.lower()
+
+    # Handle highest spending category directly from database
+    asks_highest_category = (
+        any(word in question for word in
+            ["highest", "most", "largest", "top", "maximum"])
+        and any(word in question for word in
+                ["category", "spend", "expense"])
+    )
+
+    if asks_highest_category:
+        if ranked_categories:
+            category, value = ranked_categories[0]
+
+            answer = (
+                f"Your highest spending category this month is "
+                f"{category}, with recorded expenses of ₹{value:,.0f}."
+            )
+        else:
+            answer = "You have no recorded expenses this month yet."
+
+        return {
+            "answer": answer,
+            "source": "database"
+        }
+
+    # Prepare category information for Gemini
+    category_context = ", ".join(
+        f"{category}: ₹{amount:,.0f}"
+        for category, amount in ranked_categories
+    )
+
+    if not category_context:
+        category_context = "No recorded expenses by category."
 
     api_key = os.getenv("GEMINI_API_KEY", "")
 
@@ -214,9 +289,13 @@ async def chat(
             f"Current month income: ₹{inc:.2f}. "
             f"Current month expenses: ₹{exp:.2f}. "
             f"Net cash flow: ₹{inc-exp:.2f}. "
-            f"Answer simply using only this context. "
+            f"Expense breakdown by category: {category_context}. "
+            f"Answer the user's actual question using the supplied data. "
+            f"Do not repeat a generic summary when a specific answer "
+            f"is requested. Do not invent financial information. "
+            f"State when data is insufficient. "
             f"Do not claim bank access or provide investment, tax, "
-            f"or legal advice. State when data is insufficient. "
+            f"or legal advice. "
             f"Question: {payload.message}"
         )
 
@@ -245,28 +324,38 @@ async def chat(
         except Exception as exc:
             print(f"Gemini API error: {type(exc).__name__}: {exc}")
 
-    q = payload.message.lower()
+    # Local fallback responses
+    if "category" in question:
+        if ranked_categories:
+            answer = (
+                "Your spending by category this month is: "
+                + "; ".join(
+                    f"{category}: ₹{amount:,.0f}"
+                    for category, amount in ranked_categories
+                )
+            )
+        else:
+            answer = "You have no recorded expenses this month."
 
-    if "spend" in q or "expense" in q:
+    elif "spend" in question or "expense" in question:
         answer = (
             f"Your recorded income this month is ₹{inc:,.0f} "
             f"and recorded expenses are ₹{exp:,.0f}. "
             f"Your net cash flow is ₹{inc-exp:,.0f}."
         )
 
-    elif "save" in q:
+    elif "save" in question:
         answer = (
-            "Start with a small, repeatable target. "
-            "Review your largest spending category and "
-            "set a weekly limit you can realistically follow."
+            "Start with a small, repeatable savings target. "
+            "Review your largest spending category and set a "
+            "weekly spending limit you can realistically follow."
         )
 
     else:
         answer = (
             "I can help review your recorded income, expenses "
-            "and savings habits. Add transactions for more "
-            "personalised insights. This prototype assistant "
-            "is informational, not financial advice."
+            "and savings habits. Ask me about your spending "
+            "categories or monthly cash flow."
         )
 
     return {
