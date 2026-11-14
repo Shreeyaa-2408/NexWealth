@@ -1,0 +1,7 @@
+date,description,category,amount,type
+2026-11-01,Monthly salary,Income,30000,income
+2026-11-08,Electricity bill,Bills,1850,expense
+2026-11-10,Netflix subscription,Entertainment,600,expense
+2026-11-13,Amazon India,Shopping,1200,expense
+2026-11-13,Uber ride,Travel,150,expense
+2026-11-14,Lunch with friends,Food,450,expense
